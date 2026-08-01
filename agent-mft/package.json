@@ -1,0 +1,17 @@
+{
+  "name": "agent-mft",
+  "version": "0.1.0",
+  "description": "Agent MFT — Everything-style addressing layer for Pi memory backends",
+  "type": "module",
+  "license": "MIT",
+  "keywords": ["pi-package", "extension", "memory", "mft", "search"],
+  "pi": {
+    "extensions": ["./src/index.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  }
+}

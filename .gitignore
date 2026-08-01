@@ -1,0 +1,15 @@
+# pi runtime (project mirror, session state)
+.pi/
+
+# research raw archives (third-party source dumps & tarballs)
+research/src/
+*.tgz
+*.tar.gz
+
+# node
+node_modules/
+*.log
+
+# os
+Thumbs.db
+.DS_Store

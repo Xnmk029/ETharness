@@ -1,0 +1,268 @@
+/**
+ * mirror.ts — cross-session rebuildable projection (SQLite, node:sqlite).
+ *
+ * The mirror is a *projection*: backends (chendpoc MEMORY.md, obs session
+ * ledger) are the source of truth. The mirror can be dropped and rebuilt at
+ * any time via rebuild.ts. It exists for fast unified addressing.
+ *
+ * Storage layout: single table `mirror` + `addr_seq` (address counter).
+ */
+
+import { DatabaseSync } from "node:sqlite";
+import { encodeAddr } from "./addr.ts";
+import type { Filter, MemoryRecord } from "./query.ts";
+import { query as applyQuery } from "./query.ts";
+
+const SCHEMA = `
+CREATE TABLE IF NOT EXISTS mirror (
+  addr       TEXT PRIMARY KEY,
+  backend    TEXT NOT NULL,
+  backend_key TEXT NOT NULL,
+  filename   TEXT NOT NULL,
+  kind       TEXT NOT NULL,
+  entity     TEXT,
+  entity2    TEXT,
+  path       TEXT,
+  project    TEXT,
+  ts         TEXT,
+  importance REAL NOT NULL DEFAULT 0.5,
+  status     TEXT NOT NULL DEFAULT 'active',
+  supersedes TEXT,
+  src        TEXT,
+  meta       TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_mirror_kind ON mirror(kind);
+CREATE INDEX IF NOT EXISTS idx_mirror_entity ON mirror(entity);
+CREATE INDEX IF NOT EXISTS idx_mirror_project ON mirror(project);
+CREATE INDEX IF NOT EXISTS idx_mirror_backend ON mirror(backend);
+CREATE INDEX IF NOT EXISTS idx_mirror_status ON mirror(status);
+CREATE TABLE IF NOT EXISTS addr_seq (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  seq INTEGER NOT NULL
+);
+INSERT OR IGNORE INTO addr_seq (id, seq) VALUES (1, 0);
+`;
+
+interface Row {
+  addr: string;
+  backend: string;
+  backend_key: string;
+  filename: string;
+  kind: string;
+  entity: string | null;
+  entity2: string | null;
+  path: string | null;
+  project: string | null;
+  ts: string | null;
+  importance: number;
+  status: string;
+  supersedes: string | null;
+  src: string | null;
+  meta: string | null;
+}
+
+function rowToRecord(r: Row): MemoryRecord {
+  return {
+    addr: r.addr,
+    backend: r.backend as MemoryRecord["backend"],
+    backend_key: r.backend_key,
+    filename: r.filename,
+    kind: r.kind as MemoryRecord["kind"],
+    entity: r.entity ?? undefined,
+    entity2: r.entity2 ?? undefined,
+    path: r.path ?? undefined,
+    project: r.project ?? undefined,
+    ts: r.ts ?? undefined,
+    importance: r.importance,
+    status: r.status as MemoryRecord["status"],
+    supersedes: r.supersedes ?? undefined,
+    src: r.src ?? "",
+    meta: r.meta ? JSON.parse(r.meta) : undefined,
+  };
+}
+
+function recordToRow(r: MemoryRecord): Row {
+  return {
+    addr: r.addr,
+    backend: r.backend,
+    backend_key: r.backend_key ?? r.src,
+    filename: r.filename,
+    kind: r.kind,
+    entity: r.entity ?? null,
+    entity2: r.entity2 ?? null,
+    path: r.path ?? null,
+    project: r.project ?? null,
+    ts: r.ts ?? null,
+    importance: r.importance,
+    status: r.status,
+    supersedes: r.supersedes ?? null,
+    src: r.src ?? "",
+    meta: r.meta ? JSON.stringify(r.meta) : null,
+  };
+}
+
+export class Mirror {
+  private db: DatabaseSync;
+  readonly path: string;
+
+  constructor(dbPath: string) {
+    this.path = dbPath;
+    this.db = new DatabaseSync(dbPath);
+    this.db.exec("PRAGMA journal_mode = WAL;");
+    this.db.exec("PRAGMA busy_timeout = 3000;");
+    this.db.exec(SCHEMA);
+  }
+
+  /** Allocate the next deterministic address. */
+  nextAddr(): string {
+    const row = this.db.prepare("SELECT seq FROM addr_seq WHERE id = 1").get() as
+      | { seq: number }
+      | undefined;
+    const seq = (row?.seq ?? 0) + 1;
+    this.db.prepare("UPDATE addr_seq SET seq = ? WHERE id = 1").run(seq);
+    return encodeAddr(seq);
+  }
+
+  /** Peek the current sequence without consuming. */
+  peekSeq(): number {
+    const row = this.db.prepare("SELECT seq FROM addr_seq WHERE id = 1").get() as
+      | { seq: number }
+      | undefined;
+    return row?.seq ?? 0;
+  }
+
+  upsert(record: MemoryRecord): void {
+    const r = recordToRow(record);
+    this.db
+      .prepare(
+        `INSERT INTO mirror (addr, backend, backend_key, filename, kind, entity, entity2, path, project, ts, importance, status, supersedes, src, meta)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(addr) DO UPDATE SET
+           backend=excluded.backend, backend_key=excluded.backend_key, filename=excluded.filename,
+           kind=excluded.kind, entity=excluded.entity, entity2=excluded.entity2, path=excluded.path,
+           project=excluded.project, ts=excluded.ts, importance=excluded.importance,
+           status=excluded.status, supersedes=excluded.supersedes, src=excluded.src, meta=excluded.meta`,
+      )
+      .run(
+        r.addr,
+        r.backend,
+        r.backend_key,
+        r.filename,
+        r.kind,
+        r.entity,
+        r.entity2,
+        r.path,
+        r.project,
+        r.ts,
+        r.importance,
+        r.status,
+        r.supersedes,
+        r.src,
+        r.meta,
+      );
+  }
+
+  bulkUpsert(records: MemoryRecord[]): number {
+    const upsert = this.db.prepare(
+      `INSERT INTO mirror (addr, backend, backend_key, filename, kind, entity, entity2, path, project, ts, importance, status, supersedes, src, meta)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(addr) DO UPDATE SET
+         backend=excluded.backend, backend_key=excluded.backend_key, filename=excluded.filename,
+         kind=excluded.kind, entity=excluded.entity, entity2=excluded.entity2, path=excluded.path,
+         project=excluded.project, ts=excluded.ts, importance=excluded.importance,
+         status=excluded.status, supersedes=excluded.supersedes, src=excluded.src, meta=excluded.meta`,
+    );
+    this.db.exec("BEGIN");
+    try {
+      for (const r of records) {
+        const row = recordToRow(r);
+        upsert.run(
+          row.addr,
+          row.backend,
+          row.backend_key,
+          row.filename,
+          row.kind,
+          row.entity,
+          row.entity2,
+          row.path,
+          row.project,
+          row.ts,
+          row.importance,
+          row.status,
+          row.supersedes,
+          row.src,
+          row.meta,
+        );
+      }
+      this.db.exec("COMMIT");
+    } catch (e) {
+      this.db.exec("ROLLBACK");
+      throw e;
+    }
+    return records.length;
+  }
+
+  getByAddr(addr: string): MemoryRecord | null {
+    const row = this.db.prepare("SELECT * FROM mirror WHERE addr = ?").get(addr.toUpperCase()) as
+      | Row
+      | undefined;
+    return row ? rowToRecord(row) : null;
+  }
+
+  getByBackendKey(backend: string, backendKey: string): MemoryRecord | null {
+    const row = this.db
+      .prepare("SELECT * FROM mirror WHERE backend = ? AND backend_key = ?")
+      .get(backend, backendKey) as Row | undefined;
+    return row ? rowToRecord(row) : null;
+  }
+
+  listAll(): MemoryRecord[] {
+    const rows = this.db.prepare("SELECT * FROM mirror").all() as Row[];
+    return rows.map(rowToRecord);
+  }
+
+  count(): number {
+    const row = this.db.prepare("SELECT COUNT(*) AS n FROM mirror").get() as { n: number };
+    return row.n;
+  }
+
+  /** Filter + score + limit over the mirror (in-memory match; fine for <100k rows). */
+  queryByFilter(filter: Filter, limit = 50): MemoryRecord[] {
+    return applyQuery(this.listAll(), filter, limit);
+  }
+
+  markSuperseded(oldAddr: string, newAddr: string): boolean {
+    const res = this.db
+      .prepare("UPDATE mirror SET status = 'superseded', supersedes = ? WHERE addr = ? AND status != 'revoked'")
+      .run(newAddr, oldAddr.toUpperCase());
+    return res.changes > 0;
+  }
+
+  markRevoked(addr: string): boolean {
+    const res = this.db
+      .prepare("UPDATE mirror SET status = 'revoked' WHERE addr = ?")
+      .run(addr.toUpperCase());
+    return res.changes > 0;
+  }
+
+  deleteAll(): number {
+    const res = this.db.prepare("DELETE FROM mirror").run();
+    return res.changes;
+  }
+
+  /** Quick check whether a record exists (by backend key) — used by rebuild for idempotency. */
+  hasBackendKey(backend: string, backendKey: string): boolean {
+    const row = this.db
+      .prepare("SELECT 1 FROM mirror WHERE backend = ? AND backend_key = ? LIMIT 1")
+      .get(backend, backendKey);
+    return row !== undefined;
+  }
+
+  close(): void {
+    try {
+      this.db.close();
+    } catch {
+      // already closed
+    }
+  }
+}
