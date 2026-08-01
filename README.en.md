@@ -1,27 +1,29 @@
 # ETharness
 
-**Agent MFT** — An Everything-style memory addressing layer for [Pi](https://pi.dev): filter-syntax addressing plus deterministic addresses, locating facts across memory backends with precision across sessions.
+**Agent MFT** — A memory addressing layer for [Pi](https://pi.dev). This project implements Everything-style filter syntax and deterministic addresses for cross-session, cross-backend memory retrieval in agent workflows.
 
 [中文文档](README.md)
 
 ## Overview
 
-Most agent memory systems compete on extraction quality (model capability). ETharness differentiates on the engineering of memory **addressing, storage, and invocation** — the same way Everything relates to the Windows filesystem: it does not replace the file manager; it is an index layer mounted on top of it.
+Agent session memory is conventionally bounded by the context window; cross-session consistency relies on repeated restatement or summary compression. The core abstraction of this project is an independent memory addressing system. Its design objectives include:
 
-Research findings (details in [research/](research/)):
+- Locating memories through filter expressions across dimensions such as type, entity, path, time, importance, and status
+- Assigning stable addresses to memories, enabling cross-session references and supersession tracking
+- Unifying multiple memory backends through a rebuildable mirror projection (SQLite)
+- Forming a stable prefix from a resident memory set, in conjunction with DeepSeek disk caching, for low-cost cross-session presence
 
-- Existing memory extensions (mem0, MemOS, MemPalace, pi-observational-memory, @chendpoc/pi-memory, and more) already cover storage, injection, compaction, and redaction
-- **Still unimplemented anywhere**: Everything-style filter syntax, deterministic address references, rebuildable cross-session projections, and a memory browser
-- ETharness builds only the gap: no storage, no injection, no compaction — only the addressing layer
+The system is provided in two forms: a Pi extension (`agent-mft/`) and a graphical interface (`gui/`). The storage layer uses the Node built-in `node:sqlite` module with no native dependencies.
 
 ## Features
 
-- **Everything-style filter syntax**: `type:decision entity:auth since:2w imp:>0.6`, `#A1F3`, `--term` exclusion
-- **Deterministic addresses**: stable short codes (`#A1F3`) for cross-session references; `mem_supersede` builds decision supersession chains
-- **Rebuildable cross-session projection**: the mirror (SQLite) can be fully rebuilt from backends (`/mft:rebuild`); addresses stay stable and are never reused
-- **Dual mirrors**: project-local (`.pi/agent-mft/mirror.sqlite`) + global (`~/.pi/agent/agent-mft/mirror.sqlite`) merged queries
-- **First-turn injection**: rule-based evaluation decides whether to inject the memory map on the first turn (or manually via `/mft:inject`)
-- **Zero native dependencies**: storage uses Node's built-in `node:sqlite` (WAL mode)
+- **Filter syntax addressing**: `type:decision entity:auth since:2w imp:>0.6`, `#A1F3`, `--term` exclusion
+- **Deterministic addresses**: Base36 short codes; addresses are never reused and remain stable across sessions
+- **Rebuildable projection**: the mirror can be fully rebuilt from backends (chendpoc, obs, manual) with stable address mapping
+- **Dual mirrors**: project-local (`.pi/agent-mft/mirror.sqlite`) and global (`~/.pi/agent/agent-mft/mirror.sqlite`) merged queries
+- **Resident memory**: pinned or high-importance memories form a byte-stable prefix injected into the system prompt each turn
+- **Cache telemetry**: records cache hit and miss tokens, estimating savings by model price delta
+- **Creative memory kinds**: character, world, idea, material, plan, event, style
 
 ## Architecture
 
@@ -29,87 +31,120 @@ Research findings (details in [research/](research/)):
 User / Agent
    |  mem_query "type:decision entity:auth since:2w"
    v
-+----------------------------------------------+
-| Agent MFT addressing layer (agent-mft)        |
-|  - query engine  (query.ts, Everything syntax)|
-|  - address system (addr.ts, deterministic)    |
-|  - mirror        (mirror.ts, rebuildable)     |
-|  - runtime       (runtime.ts, dual merge)     |
-|  - tools/commands (mem_* tools, /mft cmds)    |
-+--------+-------------+-------------+---------+
-         |             |             |
-   chendpoc adapter  obs adapter  manual adapter
-   (MEMORY.md)    (session ledger) (mirror itself)
++-----------------------------------------------+
+| Addressing layer (agent-mft)                    |
+|  - query engine  (query.ts, filter syntax)      |
+|  - address system (addr.ts, deterministic)      |
+|  - mirror        (mirror.ts, SQLite, rebuildable)|
+|  - runtime       (runtime.ts, dual merge)       |
+|  - tools/commands (mem_* tools, /mft commands)  |
++---------+-------------+--------------+---------+
+          |             |              |
+   chendpoc adapter  obs adapter    manual adapter
+   (MEMORY.md)     (session ledger)  (mirror itself)
 ```
 
-Design principle: **backends are the source of truth; the mirror is only a projection.** The mirror can be dropped and rebuilt at any time; the `backend_key -> addr` mapping stays stable across rebuilds, and addresses are never reused.
+Backends serve as the source of truth; the mirror is a projection that can be dropped and rebuilt at any time.
 
 ## Quick Start
 
 ```bash
-# 1. Add agent-mft as a pi extension (or append the path to the extensions
-#    list in ~/.pi/agent/settings.json)
+# Install the extension (or append the path to the extensions list
+# in ~/.pi/agent/settings.json)
 pi install /absolute/path/to/agent-mft
 
-# 2. Restart pi
-# 3. Verify
+# Restart Pi, then verify
 /mft:stats
 ```
 
 On first start with an empty mirror, the extension automatically rebuilds the projection from installed memory backends.
 
+## Addressing Syntax
+
+```
+<expr> := <term> ( <space> <term> )*
+<term> := <keyword>                  # filename substring match
+        | type:<kind>                # memory kind
+        | entity:<name>              # entity match
+        | path:<a/b>                 # hierarchical prefix
+        | backend:<obs|chendpoc|manual>
+        | since:<1h|1d|2w|3m|1y>     # time window
+        | imp:>0.7                   # importance comparison
+        | status:active|superseded|revoked
+        | #<ADDR>                    # deterministic address
+        | --<term>                   # exclusion
+```
+
+Examples: `type:decision entity:auth since:2w`, `#A1F3`, `backend:chendpoc kind:preference`.
+
 ## Agent Tools
 
 | Tool | Description |
 |---|---|
-| `mem_query {expr, limit?}` | Everything-style addressing query |
-| `mem_get {addr}` | Expand a memory (metadata + backend source) |
-| `mem_add {filename, kind, entity?, path?, importance?, content?}` | Record a durable memory, returns its address |
-| `mem_supersede {old_addr, new_addr}` | Mark an old decision superseded |
-| `mem_revoke {addr}` | Revoke a wrong/obsolete memory |
+| `mem_query {expr, limit?}` | Filter-syntax addressing query |
+| `mem_get {addr}` | Expand a memory (metadata and backend source) |
+| `mem_add {filename, kind, entity?, path?, importance?, content?}` | Record a durable memory; returns its address |
+| `mem_supersede {old_addr, new_addr}` | Mark an old record superseded |
+| `mem_revoke {addr}` | Revoke a record |
+| `mem_pin {addr}` / `mem_unpin {addr}` | Join / leave the resident set |
 
 ## User Commands
 
 | Command | Description |
 |---|---|
-| `/mft <expr>` | Browse memories (filter, select, expand); Tab completes syntax |
+| `/mft <expr>` | Browse memories (filter, select, expand); syntax completion supported |
 | `/mft:add <text> [kind=decision] [entity=x] [imp=0.8]` | Manually record a memory |
-| `/mft:inject` | Manually inject the memory map into the next turn |
-| `/mft:rebuild` | Rebuild the mirror projection from backends |
-| `/mft:stats` | Mirror statistics |
+| `/mft:pin <addr>` / `/mft:unpin <addr>` | Resident set management |
+| `/mft:resident` | Show the resident set |
+| `/mft:inject` | Manually inject the memory map |
+| `/mft:rebuild` | Rebuild the mirror from backends |
+| `/mft:stats` / `/mft:cache` | Mirror statistics / cache telemetry |
+
+## Resident Memory and Caching
+
+The resident set consists of pinned and high-importance records, ordered stably by address. The set is appended to the system prompt each turn with byte-level stability, satisfying the prefix-matching requirement of DeepSeek disk caching (hit: $0.0028/M, miss: $0.14/M, V4-Flash). Dynamic retrieval results are injected as a message on the first turn and do not affect the resident prefix.
+
+Cache usage is collected from the `usage` field of `message_end` events; `/mft:cache` reports the hit rate and estimated savings by price delta.
+
+## Graphical Interface
+
+`gui/` provides a local interface with zero dependencies: a Pi RPC subprocess handles conversation, while the agent-mft kernel is imported directly (Node 24 type-stripping). The interface includes a memory browser (filters, tabs, pinning), streaming conversation, and a cache dashboard.
+
+```bash
+node gui/server.ts --project "G:/产品/harness"   # open http://127.0.0.1:8787
+```
 
 ## Backend Adapters
 
 | Backend | Source | Description |
 |---|---|---|
-| `chendpoc` | `~/.pi/pi-memory-data/MEMORY.md` + `auto-*.md` | Parses @chendpoc/pi-memory's cross-session Markdown ground truth (overflow files, `[user]` markers, section mapping) |
-| `obs` | `~/.pi/agent/sessions/**/*.jsonl` | Parses pi-observational-memory's session ledger (observations/reflections) with source evidence replay |
-| `manual` | mirror itself | Written directly by `mem_add` / `/mft:add`; preserved across rebuilds |
+| `chendpoc` | `~/.pi/pi-memory-data/MEMORY.md` + `auto-*.md` | Parses cross-session Markdown ground truth (overflow files, `[user]` markers, section mapping) |
+| `obs` | `~/.pi/agent/sessions/**/*.jsonl` | Parses session ledger entries (observations / reflections) with evidence replay |
+| `manual` | mirror itself | Written by `mem_add` / `/mft:add`; preserved across rebuilds |
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |---|---|---|
 | `MFT_MEMORY_DIR` | `~/.pi/pi-memory-data` | chendpoc memory directory |
-| `MFT_SESSIONS_DIR` | `~/.pi/agent/sessions` | pi sessions directory |
+| `MFT_SESSIONS_DIR` | `~/.pi/agent/sessions` | Pi sessions directory |
 | `MFT_GLOBAL_DB` | `~/.pi/agent/agent-mft/mirror.sqlite` | global mirror path |
+| `PI_CLI` | npm global path probe | Pi CLI location (GUI) |
 
 ## Development
 
 ```bash
 cd agent-mft
-node --test    # 46 unit tests (Node 24 native TS, zero dependencies)
+node --test    # 53 unit tests (Node 24 native TypeScript)
 ```
 
-Requirements: Node.js >= 24 (`node:sqlite`), pi >= 0.83.
+Requirements: Node.js >= 24 (`node:sqlite`), Pi >= 0.83.
 
 ## Documentation
 
-- [Design document](docs/DESIGN-PI.md) — v0.3 strategy and implementation design
-- [Pi memory ecosystem](research/pi-memory-ecosystem.md) — landscape survey
-- [Source deep-dive](research/pi-memory-deepdive.md) — pi-observational-memory & @chendpoc/pi-memory analysis
-- [Model selection](research/model-selection-v4flash.md) — DeepSeek-V4-Flash-0731 evaluation
-- [MCP memory ecosystem](research/mcp-memory-ecosystem.md) — general memory layer survey
+- [Design document](docs/DESIGN-PI.md)
+- [Product positioning](docs/PRD.md)
+- [GUI guide](gui/README.md)
 
 ## License
 
