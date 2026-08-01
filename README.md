@@ -19,6 +19,7 @@
 - **跨会话可重建投影**：镜像（SQLite）可从后端全量重建（`/mft:rebuild`），地址稳定不重用
 - **双库设计**：项目级（`.pi/agent-mft/mirror.sqlite`）+ 全局（`~/.pi/agent/agent-mft/mirror.sqlite`）合并查询
 - **首轮评估注入**：会话首轮按规则评估是否注入记忆地图（可 `/mft:inject` 手动触发）
+- **DeepSeek 缓存感知记忆层**：稳定热区注入 + 缓存统计面板 + 缓存窗口管理 + 跨会话全局缓存（命中价 $0.0028/M vs 未命中 $0.14/M，50 倍差价）
 - **零原生依赖**：存储层使用 Node 内置 `node:sqlite`（WAL 模式）
 
 ## 架构
