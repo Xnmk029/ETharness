@@ -29,7 +29,9 @@ CREATE TABLE IF NOT EXISTS mirror (
   status     TEXT NOT NULL DEFAULT 'active',
   supersedes TEXT,
   src        TEXT,
-  meta       TEXT
+  meta       TEXT,
+  pinned     INTEGER NOT NULL DEFAULT 0,
+  pinned_at  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_mirror_kind ON mirror(kind);
 CREATE INDEX IF NOT EXISTS idx_mirror_entity ON mirror(entity);
@@ -41,7 +43,27 @@ CREATE TABLE IF NOT EXISTS addr_seq (
   seq INTEGER NOT NULL
 );
 INSERT OR IGNORE INTO addr_seq (id, seq) VALUES (1, 0);
+CREATE TABLE IF NOT EXISTS telemetry (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT NOT NULL,
+  session_id TEXT,
+  cache_read INTEGER NOT NULL DEFAULT 0,
+  cache_write INTEGER NOT NULL DEFAULT 0,
+  input_tokens INTEGER NOT NULL DEFAULT 0
+);
 `;
+
+/** Add columns introduced after v1 to pre-existing databases. */
+function migrate(db: DatabaseSync): void {
+  const cols = db.prepare("PRAGMA table_info(mirror)").all() as { name: string }[];
+  const names = new Set(cols.map((c) => c.name));
+  if (!names.has("pinned")) {
+    db.exec("ALTER TABLE mirror ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!names.has("pinned_at")) {
+    db.exec("ALTER TABLE mirror ADD COLUMN pinned_at TEXT");
+  }
+}
 
 interface Row {
   addr: string;
@@ -59,6 +81,8 @@ interface Row {
   supersedes: string | null;
   src: string | null;
   meta: string | null;
+  pinned: number;
+  pinned_at: string | null;
 }
 
 function rowToRecord(r: Row): MemoryRecord {
@@ -78,6 +102,8 @@ function rowToRecord(r: Row): MemoryRecord {
     supersedes: r.supersedes ?? undefined,
     src: r.src ?? "",
     meta: r.meta ? JSON.parse(r.meta) : undefined,
+    pinned: r.pinned === 1,
+    pinned_at: r.pinned_at ?? undefined,
   };
 }
 
@@ -98,6 +124,8 @@ function recordToRow(r: MemoryRecord): Row {
     supersedes: r.supersedes ?? null,
     src: r.src ?? "",
     meta: r.meta ? JSON.stringify(r.meta) : null,
+    pinned: r.pinned ? 1 : 0,
+    pinned_at: r.pinned_at ?? null,
   };
 }
 
@@ -111,6 +139,7 @@ export class Mirror {
     this.db.exec("PRAGMA journal_mode = WAL;");
     this.db.exec("PRAGMA busy_timeout = 3000;");
     this.db.exec(SCHEMA);
+    migrate(this.db);
   }
 
   /** Allocate the next deterministic address. */
@@ -135,13 +164,14 @@ export class Mirror {
     const r = recordToRow(record);
     this.db
       .prepare(
-        `INSERT INTO mirror (addr, backend, backend_key, filename, kind, entity, entity2, path, project, ts, importance, status, supersedes, src, meta)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO mirror (addr, backend, backend_key, filename, kind, entity, entity2, path, project, ts, importance, status, supersedes, src, meta, pinned, pinned_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(addr) DO UPDATE SET
            backend=excluded.backend, backend_key=excluded.backend_key, filename=excluded.filename,
            kind=excluded.kind, entity=excluded.entity, entity2=excluded.entity2, path=excluded.path,
            project=excluded.project, ts=excluded.ts, importance=excluded.importance,
-           status=excluded.status, supersedes=excluded.supersedes, src=excluded.src, meta=excluded.meta`,
+           status=excluded.status, supersedes=excluded.supersedes, src=excluded.src, meta=excluded.meta,
+           pinned=excluded.pinned, pinned_at=excluded.pinned_at`,
       )
       .run(
         r.addr,
@@ -159,18 +189,21 @@ export class Mirror {
         r.supersedes,
         r.src,
         r.meta,
+        r.pinned,
+        r.pinned_at,
       );
   }
 
   bulkUpsert(records: MemoryRecord[]): number {
     const upsert = this.db.prepare(
-      `INSERT INTO mirror (addr, backend, backend_key, filename, kind, entity, entity2, path, project, ts, importance, status, supersedes, src, meta)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO mirror (addr, backend, backend_key, filename, kind, entity, entity2, path, project, ts, importance, status, supersedes, src, meta, pinned, pinned_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(addr) DO UPDATE SET
          backend=excluded.backend, backend_key=excluded.backend_key, filename=excluded.filename,
          kind=excluded.kind, entity=excluded.entity, entity2=excluded.entity2, path=excluded.path,
          project=excluded.project, ts=excluded.ts, importance=excluded.importance,
-         status=excluded.status, supersedes=excluded.supersedes, src=excluded.src, meta=excluded.meta`,
+         status=excluded.status, supersedes=excluded.supersedes, src=excluded.src, meta=excluded.meta,
+         pinned=excluded.pinned, pinned_at=excluded.pinned_at`,
     );
     this.db.exec("BEGIN");
     try {
@@ -192,6 +225,8 @@ export class Mirror {
           row.supersedes,
           row.src,
           row.meta,
+          row.pinned,
+          row.pinned_at,
         );
       }
       this.db.exec("COMMIT");
@@ -243,6 +278,49 @@ export class Mirror {
       .prepare("UPDATE mirror SET status = 'revoked' WHERE addr = ?")
       .run(addr.toUpperCase());
     return res.changes > 0;
+  }
+
+  // ── resident memory (pinned) ────────────────────────────────────────────
+
+  setPinned(addr: string, pinned: boolean): boolean {
+    const res = pinned
+      ? this.db
+          .prepare("UPDATE mirror SET pinned = 1, pinned_at = ? WHERE addr = ?")
+          .run(new Date().toISOString(), addr.toUpperCase())
+      : this.db
+          .prepare("UPDATE mirror SET pinned = 0, pinned_at = NULL WHERE addr = ?")
+          .run(addr.toUpperCase());
+    return res.changes > 0;
+  }
+
+  listPinned(): MemoryRecord[] {
+    const rows = this.db
+      .prepare("SELECT * FROM mirror WHERE pinned = 1 AND status = 'active' ORDER BY pinned_at")
+      .all() as Row[];
+    return rows.map(rowToRecord);
+  }
+
+  // ── cache telemetry ─────────────────────────────────────────────────────
+
+  recordTelemetry(input: { sessionId?: string; cacheRead: number; cacheWrite: number; inputTokens: number }): void {
+    this.db
+      .prepare("INSERT INTO telemetry (ts, session_id, cache_read, cache_write, input_tokens) VALUES (?, ?, ?, ?, ?)")
+      .run(new Date().toISOString(), input.sessionId ?? null, input.cacheRead, input.cacheWrite, input.inputTokens);
+  }
+
+  telemetrySummary(): {
+    requests: number;
+    totalInput: number;
+    totalCacheRead: number;
+    hitRate: number;
+  } {
+    const row = this.db
+      .prepare(
+        "SELECT COUNT(*) AS n, COALESCE(SUM(input_tokens),0) AS inp, COALESCE(SUM(cache_read),0) AS cr FROM telemetry",
+      )
+      .get() as { n: number; inp: number; cr: number };
+    const hitRate = row.inp > 0 ? row.cr / row.inp : 0;
+    return { requests: row.n, totalInput: row.inp, totalCacheRead: row.cr, hitRate };
   }
 
   deleteAll(): number {

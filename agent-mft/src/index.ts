@@ -77,31 +77,72 @@ export default function agentMft(pi: ExtensionAPI) {
     runtime = null;
   });
 
-  // ── first-turn injection ─────────────────────────────────────────────────
+  // ── resident + dynamic injection ────────────────────────────────────────
+  //
+  // Resident block: appended to the system prompt on EVERY turn. Content is
+  // byte-stable (pinned ∪ high-importance, addr order) so the DeepSeek disk
+  // cache treats it as a persistent prefix unit — free across sessions.
+  // Dynamic block: injected as a message only on the FIRST turn.
 
   pi.on("before_agent_start", async (event, ctx) => {
     const rt = runtime;
-    if (!rt || !rt.isFirstTurn) return;
-    rt.isFirstTurn = false;
+    if (!rt) return;
 
-    const prompt = String(event.prompt ?? "").trim();
-    if (!prompt) return;
+    let result: { message?: unknown; systemPrompt?: string } | undefined;
 
+    // resident block → system prompt tail (every turn, byte-stable)
     try {
-      const records = rt.evaluateInjection(prompt);
-      if (records.length === 0) return;
-
-      const map = rt.renderMemoryMap(records);
-      return {
-        message: {
-          customType: "agent-mft:memory-map",
-          content: map,
-          display: true,
-        },
-      };
+      const resident = rt.renderResidentBlock();
+      if (resident) {
+        result = { ...result, systemPrompt: `${event.systemPrompt}\n\n${resident}` };
+      }
     } catch {
-      // non-fatal: memory injection must never break a turn
-      return;
+      // non-fatal
+    }
+
+    // dynamic block → message, only first turn
+    if (rt.isFirstTurn) {
+      rt.isFirstTurn = false;
+      const prompt = String(event.prompt ?? "").trim();
+      if (prompt) {
+        try {
+          const records = rt.evaluateInjection(prompt);
+          if (records.length > 0) {
+            const map = rt.renderMemoryMap(records);
+            result = {
+              ...result,
+              message: {
+                customType: "agent-mft:memory-map",
+                content: map,
+                display: true,
+              },
+            };
+          }
+        } catch {
+          // non-fatal: memory injection must never break a turn
+        }
+      }
+    }
+
+    return result;
+  });
+
+  // ── cache telemetry ─────────────────────────────────────────────────────
+
+  pi.on("message_end", (event) => {
+    const rt = runtime;
+    if (!rt || event.message.role !== "assistant") return;
+    const usage = (event.message as { usage?: { input?: number; cacheRead?: number; cacheWrite?: number } }).usage;
+    if (!usage || typeof usage.input !== "number") return;
+    try {
+      rt.recordCacheUsage({
+        sessionId: undefined,
+        cacheRead: usage.cacheRead ?? 0,
+        cacheWrite: usage.cacheWrite ?? 0,
+        inputTokens: usage.input,
+      });
+    } catch {
+      // non-fatal
     }
   });
 

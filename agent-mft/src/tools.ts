@@ -16,6 +16,13 @@ const KINDS = [
   "entity_rel",
   "commit",
   "note",
+  "character",
+  "world",
+  "idea",
+  "material",
+  "plan",
+  "event",
+  "style",
 ] as const;
 
 export function registerMemoryTools(pi: ExtensionAPI, runtime: () => MftRuntime | null): void {
@@ -188,6 +195,56 @@ export function registerMemoryTools(pi: ExtensionAPI, runtime: () => MftRuntime 
       return {
         content: [{ type: "text", text: ok ? `#${params.addr} revoked.` : `Failed: #${params.addr} not found.` }],
         details: { ok },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "mem_pin",
+    label: "Memory Pin",
+    description:
+      "Pin a memory so it enters the resident set (stable prefix). Pinned memories stay present in the system prompt across sessions — free with DeepSeek prefix caching. Use for character sheets, world lore, key decisions, preferences.",
+    promptSnippet: "Pin a memory into the resident set (always present, cached)",
+    promptGuidelines: [
+      "Use mem_pin for long-lived context the user relies on every session: character settings, world lore, style preferences, standing decisions.",
+      "Prefer pinning over repeated mem_query when the same memory is needed every conversation.",
+      "Avoid pinning volatile state (in-progress tasks); use mem_add instead.",
+    ],
+    parameters: Type.Object({
+      addr: Type.String({ description: "Address of the memory to pin (e.g. A1F3)" }),
+    }),
+    async execute(_toolCallId, params) {
+      const rt = runtime();
+      if (!rt) throw new Error("agent-mft runtime not available");
+      const ok = rt.pin(params.addr.replace(/^#/, "").toUpperCase());
+      return {
+        content: [
+          {
+            type: "text",
+            text: ok
+              ? `#${params.addr} pinned — now resident (always present, cached).`
+              : `Failed: #${params.addr} not found.`,
+          },
+        ],
+        details: { ok, pinned: true },
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "mem_unpin",
+    label: "Memory Unpin",
+    description: "Remove a memory from the resident set by address.",
+    parameters: Type.Object({
+      addr: Type.String({ description: "Address of the memory to unpin (e.g. A1F3)" }),
+    }),
+    async execute(_toolCallId, params) {
+      const rt = runtime();
+      if (!rt) throw new Error("agent-mft runtime not available");
+      const ok = rt.unpin(params.addr.replace(/^#/, "").toUpperCase());
+      return {
+        content: [{ type: "text", text: ok ? `#${params.addr} unpinned.` : `Failed: #${params.addr} not found.` }],
+        details: { ok, pinned: false },
       };
     },
   });

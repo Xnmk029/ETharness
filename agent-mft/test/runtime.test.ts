@@ -98,3 +98,59 @@ test("renderMemoryMap format", () => {
   assert.ok(map.includes("采用 SQLite WAL"));
   assert.ok(map.includes("mem_get"));
 });
+
+// ── resident memory (pinned) ────────────────────────────────────────────────
+
+test("residentRecords: pinned always included regardless of importance", () => {
+  const low = runtime.addManual({ filename: "低优先级但钉住", kind: "note", importance: 0.2 });
+  runtime.pin(low.addr);
+  const hi = runtime.addManual({ filename: "高优先级自动常驻", kind: "decision", importance: 0.9 });
+  const mid = runtime.addManual({ filename: "中等不入常驻", kind: "fact", importance: 0.5 });
+  const addrs = runtime.residentRecords().map((r) => r.addr);
+  assert.ok(addrs.includes(low.addr), "pinned low-importance included");
+  assert.ok(addrs.includes(hi.addr), "high importance auto-included");
+  assert.ok(!addrs.includes(mid.addr), "mid importance excluded");
+  // stable order: pinned first
+  assert.equal(addrs[0], low.addr);
+});
+
+test("residentRecords: superseded/revoked excluded", () => {
+  const a = runtime.addManual({ filename: "旧决策", kind: "decision", importance: 0.9 });
+  const b = runtime.addManual({ filename: "新决策", kind: "decision", importance: 0.9 });
+  runtime.pin(a.addr);
+  runtime.supersede(a.addr, b.addr);
+  const addrs = runtime.residentRecords().map((r) => r.addr);
+  assert.ok(!addrs.includes(a.addr));
+  assert.ok(addrs.includes(b.addr));
+});
+
+test("pin/unpin propagate to both mirrors", () => {
+  const rec = runtime.addManual({ filename: "钉住测试", kind: "preference" });
+  assert.ok(runtime.pin(rec.addr));
+  assert.equal(runtime.projectMirror!.getByAddr(rec.addr)?.pinned, true);
+  assert.equal(runtime.globalMirror.getByAddr(rec.addr)?.pinned, true);
+  assert.ok(runtime.unpin(rec.addr));
+  assert.equal(runtime.projectMirror!.getByAddr(rec.addr)?.pinned, false);
+});
+
+test("renderResidentBlock content", () => {
+  const rec = runtime.addManual({ filename: "苏晚：左眼失明，怕黑但嘴硬", kind: "note", entity: "苏晚", importance: 0.3 });
+  runtime.pin(rec.addr);
+  const block = runtime.renderResidentBlock();
+  assert.ok(block.includes("## Resident Memory"));
+  assert.ok(block.includes(`#${rec.addr}`));
+  assert.ok(block.includes("(pinned)"));
+  assert.ok(block.includes("苏晚"));
+});
+
+// ── cache telemetry ─────────────────────────────────────────────────────────
+
+test("cacheStats: hit rate + estimated savings", () => {
+  runtime.recordCacheUsage({ cacheRead: 100_000, cacheWrite: 0, inputTokens: 1_000_000 });
+  const s = runtime.cacheStats();
+  assert.equal(s.requests, 1);
+  assert.equal(s.totalInput, 1_000_000);
+  assert.ok(Math.abs(s.hitRate - 0.1) < 0.001);
+  // saved = cacheRead/1M * (0.14 - 0.0028) = 0.1 * 0.1372
+  assert.ok(Math.abs(s.estimatedSavedUsd - 0.01372) < 0.0001);
+});

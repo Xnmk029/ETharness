@@ -106,3 +106,27 @@ test("mirror persists across reopen", () => {
   assert.equal(reopened.peekSeq(), 1);
   reopened.close();
 });
+
+test("pinned flag persists and migrates", () => {
+  const r = rec({ backend_key: "pin1" });
+  mirror.upsert(r);
+  assert.ok(mirror.setPinned(r.addr, true));
+  const got = mirror.getByAddr(r.addr);
+  assert.equal(got?.pinned, true);
+  assert.ok(got?.pinned_at);
+  assert.equal(mirror.listPinned().length, 1);
+  // unpin
+  assert.ok(mirror.setPinned(r.addr, false));
+  assert.equal(mirror.getByAddr(r.addr)?.pinned, false);
+  assert.equal(mirror.listPinned().length, 0);
+});
+
+test("telemetry record + summary", () => {
+  mirror.recordTelemetry({ cacheRead: 8000, cacheWrite: 2000, inputTokens: 10000 });
+  mirror.recordTelemetry({ cacheRead: 5000, cacheWrite: 0, inputTokens: 5000 });
+  const s = mirror.telemetrySummary();
+  assert.equal(s.requests, 2);
+  assert.equal(s.totalInput, 15000);
+  assert.equal(s.totalCacheRead, 13000);
+  assert.ok(Math.abs(s.hitRate - 13000 / 15000) < 0.001);
+});

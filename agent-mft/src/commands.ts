@@ -114,7 +114,7 @@ export function registerCommands(
       const impMatch = /imp=(\d(?:\.\d+)?)/.exec(text);
       if (kindMatch) {
         const k = kindMatch[1] as Kind;
-        if (["decision", "fact", "preference", "task_state", "entity_rel", "commit", "note"].includes(k)) {
+        if (["decision", "fact", "preference", "task_state", "entity_rel", "commit", "note", "character", "world", "idea", "material", "plan", "event", "style"].includes(k)) {
           kind = k;
         }
         filename = filename.replace(kindMatch[0], "").trim();
@@ -172,6 +172,77 @@ export function registerCommands(
             .map(([k, n]) => `${k}=${n}`)
             .join(", ")}`,
           `inject: ${String(s.inject)}`,
+        ].join("\n"),
+        "info",
+      );
+    },
+  });
+
+  pi.registerCommand("mft:pin", {
+    description: "Pin a memory into the resident set: /mft:pin <addr>",
+    handler: async (args, ctx) => {
+      const rt = runtime();
+      const addr = args.trim().replace(/^#/, "").toUpperCase();
+      if (!rt || !addr) {
+        ctx.ui.notify("Usage: /mft:pin <addr>", "info");
+        return;
+      }
+      const ok = rt.pin(addr);
+      ctx.ui.notify(ok ? `#${addr} pinned — resident (always present).` : `#${addr} not found.`, ok ? "info" : "warning");
+    },
+  });
+
+  pi.registerCommand("mft:unpin", {
+    description: "Remove a memory from the resident set: /mft:unpin <addr>",
+    handler: async (args, ctx) => {
+      const rt = runtime();
+      const addr = args.trim().replace(/^#/, "").toUpperCase();
+      if (!rt || !addr) {
+        ctx.ui.notify("Usage: /mft:unpin <addr>", "info");
+        return;
+      }
+      const ok = rt.unpin(addr);
+      ctx.ui.notify(ok ? `#${addr} unpinned.` : `#${addr} not found.`, ok ? "info" : "warning");
+    },
+  });
+
+  pi.registerCommand("mft:resident", {
+    description: "Show the current resident memory set (stable prefix)",
+    handler: async (_args, ctx) => {
+      const rt = runtime();
+      if (!rt) {
+        ctx.ui.notify("agent-mft runtime not available", "error");
+        return;
+      }
+      const records = rt.residentRecords();
+      if (records.length === 0) {
+        ctx.ui.notify("Resident set is empty. Pin memories with /mft:pin <addr>.", "info");
+        return;
+      }
+      ctx.ui.notify(
+        records
+          .map((r) => `#${r.addr} [${r.kind}] ${r.filename}${r.pinned ? " (pinned)" : " (auto)"}`)
+          .join("\n"),
+        "info",
+      );
+    },
+  });
+
+  pi.registerCommand("mft:cache", {
+    description: "Show cache telemetry (hit rate + estimated savings)",
+    handler: async (_args, ctx) => {
+      const rt = runtime();
+      if (!rt) {
+        ctx.ui.notify("agent-mft runtime not available", "error");
+        return;
+      }
+      const s = rt.cacheStats();
+      ctx.ui.notify(
+        [
+          `requests: ${s.requests}`,
+          `input tokens: ${s.totalInput.toLocaleString()}`,
+          `cache hit: ${s.totalCacheRead.toLocaleString()} (${(s.hitRate * 100).toFixed(1)}%)`,
+          `estimated saved: $${s.estimatedSavedUsd.toFixed(4)}`,
         ].join("\n"),
         "info",
       );

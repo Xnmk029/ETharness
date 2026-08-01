@@ -20,6 +20,11 @@ export interface MftConfig {
   injectLimit: number; // default 10
   injectMinImportance: number; // default 0.4
   autoRebuildOnEmpty: boolean; // default true
+  residentThreshold: number; // importance threshold for resident set (default 0.6)
+  residentMaxEntries: number; // cap for resident block (default 24)
+  // cache telemetry pricing ($ per 1M tokens) — DeepSeek V4-Flash defaults
+  cacheMissPrice: number; // default 0.14
+  cacheHitPrice: number; // default 0.0028
 }
 
 export const DEFAULT_CONFIG: MftConfig = {
@@ -27,6 +32,10 @@ export const DEFAULT_CONFIG: MftConfig = {
   injectLimit: 10,
   injectMinImportance: 0.4,
   autoRebuildOnEmpty: true,
+  residentThreshold: 0.6,
+  residentMaxEntries: 24,
+  cacheMissPrice: 0.14,
+  cacheHitPrice: 0.0028,
 };
 
 export class MftRuntime {
@@ -148,6 +157,75 @@ export class MftRuntime {
     const ok = mirror.markRevoked(addr);
     if (ok) this.globalMirror.markRevoked(addr);
     return ok;
+  }
+
+  // ── resident memory (pinned) ────────────────────────────────────────────
+
+  /** Pinned or high-importance active records, ordered stably by addr. */
+  residentRecords(): MemoryRecord[] {
+    const records = this.allRecords().filter(
+      (r) =>
+        r.status === "active" &&
+        (r.pinned === true || r.importance >= this.config.residentThreshold),
+    );
+    // stable order: pinned first (by pinned_at), then by addr — never by score
+    const pinned = records.filter((r) => r.pinned).sort((a, b) => (a.pinned_at ?? "").localeCompare(b.pinned_at ?? ""));
+    const auto = records.filter((r) => !r.pinned).sort((a, b) => a.addr.localeCompare(b.addr));
+    return [...pinned, ...auto].slice(0, this.config.residentMaxEntries);
+  }
+
+  pin(addr: string): boolean {
+    const mirror = this.projectMirror ?? this.globalMirror;
+    const ok = mirror.setPinned(addr, true);
+    if (ok) this.globalMirror.setPinned(addr, true);
+    return ok;
+  }
+
+  unpin(addr: string): boolean {
+    const mirror = this.projectMirror ?? this.globalMirror;
+    const ok = mirror.setPinned(addr, false);
+    if (ok) this.globalMirror.setPinned(addr, false);
+    return ok;
+  }
+
+  /** Render the stable resident block (injected into system prompt tail). */
+  renderResidentBlock(): string {
+    const records = this.residentRecords();
+    if (records.length === 0) return "";
+    const lines = records.map((r) => {
+      const parts = [`#${r.addr}`, `[${r.kind}]`, r.filename];
+      if (r.entity) parts.push(`(entity: ${r.entity})`);
+      if (r.pinned) parts.push("(pinned)");
+      return `- ${parts.join(" ")}`;
+    });
+    return [
+      "## Resident Memory（常驻记忆，稳定前缀）",
+      "以下记忆长期在场，跨会话免费可用。需要细节时用 mem_get <addr> 展开原文。",
+      "",
+      ...lines,
+    ].join("\n");
+  }
+
+  // ── cache telemetry ─────────────────────────────────────────────────────
+
+  recordCacheUsage(input: { sessionId?: string; cacheRead: number; cacheWrite: number; inputTokens: number }): void {
+    this.globalMirror.recordTelemetry(input);
+    this.projectMirror?.recordTelemetry(input);
+  }
+
+  cacheStats(): {
+    requests: number;
+    totalInput: number;
+    totalCacheRead: number;
+    hitRate: number;
+    estimatedSavedUsd: number;
+  } {
+    const s = this.globalMirror.telemetrySummary();
+    const savedPerM = this.config.cacheMissPrice - this.config.cacheHitPrice;
+    return {
+      ...s,
+      estimatedSavedUsd: (s.totalCacheRead / 1_000_000) * savedPerM,
+    };
   }
 
   stats(): Record<string, unknown> {

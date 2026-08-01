@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>ETharness — 记忆优先的创作伴侣</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="app">
+  <aside id="memory-panel">
+    <div class="panel-head">
+      <h2>记忆</h2>
+      <span id="cache-chip" class="chip" title="缓存命中率"></span>
+    </div>
+    <div class="filter-bar">
+      <input id="expr-input" placeholder="过滤：type:character entity:苏晚 since:2w #A1F3" spellcheck="false">
+      <button id="expr-go" title="查询">查询</button>
+    </div>
+    <div id="kind-tabs"></div>
+    <div id="resident-summary" class="resident-summary"></div>
+    <div id="memory-list" class="memory-list"></div>
+    <div class="panel-foot">
+      <button id="btn-resident" class="btn">常驻区</button>
+      <button id="btn-cache" class="btn">仪表盘</button>
+    </div>
+  </aside>
+
+  <main id="chat-panel">
+    <header id="chat-head">
+      <h1>ETharness</h1>
+      <div id="presence" class="presence"></div>
+    </header>
+    <div id="messages" class="messages"></div>
+    <div id="tool-strip" class="tool-strip"></div>
+    <div id="composer">
+      <textarea id="input" rows="3" placeholder="继续写第三章…（记忆自动在场）" spellcheck="false"></textarea>
+      <div class="composer-row">
+        <button id="btn-quick-memory" class="btn" title="把当前输入存为记忆">记下这条</button>
+        <button id="btn-send" class="btn primary">发送</button>
+      </div>
+    </div>
+  </main>
+
+  <aside id="detail-panel">
+    <div class="panel-head"><h2>详情</h2></div>
+    <div id="detail-body" class="detail-body">
+      <p class="hint">点击记忆条目查看原文与来源。</p>
+    </div>
+    <div id="dashboard" class="dashboard hidden">
+      <h3>记忆资产仪表盘</h3>
+      <div id="dash-body"></div>
+    </div>
+  </aside>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -27,7 +27,14 @@ export type Kind =
   | "task_state"
   | "entity_rel"
   | "commit"
-  | "note";
+  | "note"
+  | "character"
+  | "world"
+  | "idea"
+  | "material"
+  | "plan"
+  | "event"
+  | "style";
 
 export type Status = "active" | "superseded" | "revoked";
 
@@ -41,6 +48,14 @@ export const KINDS: readonly Kind[] = [
   "entity_rel",
   "commit",
   "note",
+  // creative / life kinds (PRD §7)
+  "character",
+  "world",
+  "idea",
+  "material",
+  "plan",
+  "event",
+  "style",
 ];
 
 export const BACKENDS: readonly BackendId[] = ["obs", "chendpoc", "mirror", "manual"];
@@ -81,6 +96,8 @@ export interface MemoryRecord {
   src: string; // backend locator for expansion
   backend: BackendId;
   meta?: Record<string, unknown>;
+  pinned?: boolean; // resident memory flag (stable prefix)
+  pinned_at?: string;
 }
 
 // ── time units ────────────────────────────────────────────────────────────
