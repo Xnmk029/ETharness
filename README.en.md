@@ -1,3 +1,10 @@
+> [!IMPORTANT]
+> # Project Status: Development Suspended
+>
+> The resident memory architecture of this project relies on the long-lived KV cache mechanism of DeepSeek models (disk prefix caching, hit price $0.0028/M).
+> Development is suspended pending the release of stronger models and verification of cache mechanism compatibility.
+> The core architecture and implementation remain intact and can be resumed once models are ready.
+
 # ETharness
 
 **Agent MFT** — A memory addressing layer for [Pi](https://pi.dev). This project implements Everything-style filter syntax and deterministic addresses for cross-session, cross-backend memory retrieval in agent workflows.
